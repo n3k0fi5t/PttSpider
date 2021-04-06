@@ -124,11 +124,11 @@ def parse_pushers(soup):
     """
     def push_tag_to_type(tag):
         if tag == u'推 ':
-            return PttPushType.UP
+            return 2
         elif tag == u'噓 ':
-            return PttPushType.DOWN
+            return 1
         else:
-            return PttPushType.ARROW
+            return 0
 
     push_list = []
 
@@ -169,10 +169,32 @@ def check_over_18(rs, board, endpoint):
     except ConnectionError:
         raise Exception("Connection error")
 
+
+def get_board_index(endpoint, board_context):
+    reg = re.compile(r"index(?P<page_index>\d{0,6})")
+    ep = reg.search(endpoint)
+    
+    if ep:
+        page_index = ep.group('page_index')
+        try:
+            max_idx = int(page_index, 10)
+        except ValueError:
+            page_info = Soup(board_context, 'html.parser').select('.btn.wide')
+            if len(page_info) < 2:
+                return None
+                
+            previous_page = page_info[1]['href']
+            res = reg.search(previous_page)
+            max_idx = int(res.group('page_index'), 10) + 1
+
+        return max_idx
+        
+    return None
+
 class PttSpider(object):
     def __init__(self, url: str, **kargs):
         self.url = PttUrl(url=url)
-        self.rs = kargs.get('rs', RequestWrapper())
+        self.rs = kargs.get('rs', None) or RequestWrapper()
 
     @abstractmethod
     def run(self):
@@ -183,9 +205,11 @@ class PttArticleListSpider(PttSpider):
     def __init__(self, url: str, **kargs):
         super().__init__(url, **kargs)
         self.max_fetch = kargs.get('max_fetch', 100)
+        self.last_page = kargs.get('last_page', None)
 
         self._board_context = ""
         self._article_list = []
+        self.latest_idx = None
 
     def run(self):
         if self.url.type is not PttUrlType.BOARD:
@@ -212,36 +236,32 @@ class PttArticleListSpider(PttSpider):
 
         return context
 
+    def _match_fetch_rule(self, fetched_items, current_url):
+        if self.last_page != None:
+            cur_page = get_board_index(current_url, self._board_context)
+
+            return cur_page >= self.last_page and len(fetched_items) < self.max_fetch
+
+        elif self.max_fetch != None:
+            return len(fetched_items) < self.max_fetch
+        
+        return False
+
     def board_urls(self):
-        reg = re.compile(r"index(?P<page_index>\d{0,6})")
-        ep = reg.search(self.url.endpoint)
+        self.latest_idx = get_board_index(self.url.endpoint, self._board_context)
 
-        if ep:
-            page_index = ep.group('page_index')
-            try:
-                max_idx = int(page_index, 10)
-            except ValueError:
-                page_info = Soup(self._board_context, 'html.parser').select('.btn.wide')
-                if len(page_info) < 2:
-                    yield None
-                    
-                lastest_page = page_info[1]['href']
-                res = reg.search(lastest_page)
-                max_idx = int(res.group('page_index'), 10) + 1
-
+        max_idx = self.latest_idx
+        if max_idx:
             for idx in range(max_idx, 0, -1):
                 yield f"{PTT_HEAD}/{PTT_MIDDLE}/{self.url.board}/index" + str(idx) + ".html"
-
-            yield None
-        else:
-            yield None
+        yield None
 
     def crawl_article_urls(self):
         url_generator = self.board_urls()
         url = next(url_generator)
         article_urls = []
 
-        while url is not None and len(article_urls) <= self.max_fetch:
+        while url is not None and self._match_fetch_rule(article_urls, url):
             try:
                 res = self.rs.get(url)
                 res.raise_for_status()
@@ -255,7 +275,10 @@ class PttArticleListSpider(PttSpider):
             except ConnectionError:
                 raise Exception("Connection error")
 
-        return article_urls[:self.max_fetch]
+        if self.last_page:
+            return article_urls
+        else:
+            return article_urls[:self.max_fetch]
 
     @staticmethod
     def parse_per_article_url(context):
@@ -278,6 +301,10 @@ class PttArticleListSpider(PttSpider):
     @property
     def article_url_list(self):
         return self._article_list
+    
+    @property
+    def board_latest_index(self):
+        return self.latest_idx
 
 
 class PttArticleSpider(PttSpider):
@@ -429,10 +456,10 @@ class PttUrlType(Enum):
     UNKNOWN = 2
 
 
-class PttPushType(Enum):
-    DOWN = -1
+class PushType(Enum):
     ARROW = 0
-    UP = 1
+    DOWN = 1
+    UP = 2
 
 
 class Push(object):
@@ -440,16 +467,13 @@ class Push(object):
     def __init__(self, **kargs):
         self.name = kargs.get("name", INVALID_USERID)
         self.content = kargs.get("content", "")
-        self.push_type = kargs.get("push_type", PttPushType.ARROW)
+        self.type = kargs.get("push_type", 0)
         self.date = kargs.get("date", "")
 
         self.article_url = kargs.get("url", "")
 
-    def update_to_db(self):
-        pass
-
     def __str__(self):
-        return "{} {}: {}".format(self.push_type, self.name, self.content)
+        return "{} {}: {}".format(self.type, self.name, self.content)
 
 
 class ArticleInfo(object):
@@ -485,4 +509,4 @@ class ArticleInfo(object):
 #c = PttArticleSpider(url="https://www.ptt.cc/bbs/Beauty/M.1600532955.A.C7F.html")
 #c = PttArticleListSpider(url="https://www.ptt.cc/bbs/Gossiping/index.html")
 #c = PttArticleListSpider(url="https://www.ptt.cc/bbs/jersey/index1.html")
-#c = PttArticleListSpider(url="https://www.ptt.cc/bbs/Beauty/index.html")
+#c = PttArticleListSpider(url="https://www.ptt.cc/bbs/Beauty/index.html", last_page=3617)

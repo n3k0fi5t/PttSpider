@@ -4,4 +4,6 @@ from .ptt_spider import (
     PttArticleSpider,
     PttUrl,
     ArticleInfo,
+    Push,
+    PushType,
 )
